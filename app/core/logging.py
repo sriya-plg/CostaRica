@@ -2,10 +2,10 @@ import json
 import logging
 import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.timezone import local_date_str, now_local
 
 # Log layout:
 #   logs/
@@ -18,7 +18,7 @@ from app.core.config import settings
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_local().isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -48,7 +48,7 @@ class DailyFolderFileHandler(logging.Handler):
             self._open_stream_for_current_date()
 
     def _open_stream_for_current_date(self) -> None:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = local_date_str()
         if today == self._current_date and self._stream is not None:
             return
         if self._stream is not None:

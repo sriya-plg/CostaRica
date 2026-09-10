@@ -1,8 +1,8 @@
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.timezone import local_iso
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS processed_emails (
@@ -38,7 +38,7 @@ def get_processed_email(message_id: str) -> sqlite3.Row | None:
 
 def insert_processed_email(message_id: str, status: str = "received") -> bool:
     """Insert a new row. Returns True if inserted, False if duplicate."""
-    received_at = datetime.now(timezone.utc).isoformat()
+    received_at = local_iso()
     with _connect() as conn:
         cursor = conn.execute(
             """
@@ -50,3 +50,12 @@ def insert_processed_email(message_id: str, status: str = "received") -> bool:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def update_processed_email_status(message_id: str, status: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE processed_emails SET status = ? WHERE message_id = ?",
+            (status, message_id),
+        )
+        conn.commit()

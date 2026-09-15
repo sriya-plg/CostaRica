@@ -108,18 +108,17 @@ def process_new_message(message_id: str) -> None:
         message_id,
     )
 
-    # Print extracted shipment & invoice numbers directly to terminal (ASCII safe for Windows console)
-    print("\n" + "=" * 60, flush=True)
-    print(" [EXTRACTED SHIPMENT & INVOICE DATA]", flush=True)
-    print("=" * 60, flush=True)
-    print(f"  - Message ID       : {message_id}", flush=True)
-    print(f"  - Email Subject    : {subject}", flush=True)
-    print(f"  - Shipment Number  : {shipment_number} (Source: {shipment_source})", flush=True)
-    print(f"  - Invoice Number   : {invoice_number} (from <NumeroConsecutivo>)", flush=True)
-    print(f"  - Invoice XML Path : {xml_results.get('invoice_xml')}", flush=True)
-    print(f"  - AHC XML Path     : {xml_results.get('ahc_xml')}", flush=True)
-    print(f"  - Download Folder  : {dest_dir}", flush=True)
-    print("=" * 60 + "\n", flush=True)
+    # Print formatted extraction summary card to terminal
+    print("\n" + "=" * 65, flush=True)
+    print("  ORDER DATA EXTRACTED (Cardtronics Costa Rica)", flush=True)
+    print("=" * 65, flush=True)
+    print(f"  Email Subject    : {subject}", flush=True)
+    print(f"  Shipment Number  : {shipment_number} (source: {shipment_source})", flush=True)
+    print(f"  Invoice Number   : {invoice_number} (from <NumeroConsecutivo>)", flush=True)
+    print(f"  Invoice XML      : {xml_results.get('invoice_xml')}", flush=True)
+    print(f"  AHC XML          : {xml_results.get('ahc_xml')}", flush=True)
+    print(f"  Downloads Folder : {dest_dir}", flush=True)
+    print("=" * 65 + "\n", flush=True)
 
     # Assemble structured JSON result
     result_payload = {

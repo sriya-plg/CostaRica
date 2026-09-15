@@ -28,6 +28,21 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class ConsoleFormatter(logging.Formatter):
+    """Clean, human-readable terminal log formatter."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        time_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
+        level_padded = f"{record.levelname:<7}"
+        logger_name = record.name.replace("app.", "")
+        msg = record.getMessage()
+
+        base_str = f"[{time_str}] [{level_padded}] [{logger_name}] {msg}"
+        if record.exc_info:
+            base_str += f"\n{self.formatException(record.exc_info)}"
+        return base_str
+
+
 class DailyFolderFileHandler(logging.Handler):
     """Write JSON logs to {log_dir}/{YYYY-MM-DD}/{filename}, rolling into a new folder at midnight."""
 
@@ -80,17 +95,19 @@ class DailyFolderFileHandler(logging.Handler):
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    formatter = JsonFormatter()
-
+    # Console output: clean human-readable
+    console_formatter = ConsoleFormatter()
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(formatter)
+    stdout_handler.setFormatter(console_formatter)
 
+    # File output: structured JSON
+    json_formatter = JsonFormatter()
     app_file_handler = DailyFolderFileHandler(settings.LOG_DIR, "app.log", level=logging.INFO)
-    app_file_handler.setFormatter(formatter)
+    app_file_handler.setFormatter(json_formatter)
     app_file_handler.prepare_for_today()
 
     error_file_handler = DailyFolderFileHandler(settings.LOG_DIR, "error.log", level=logging.ERROR)
-    error_file_handler.setFormatter(formatter)
+    error_file_handler.setFormatter(json_formatter)
     error_file_handler.prepare_for_today()
 
     root = logging.getLogger()
@@ -99,3 +116,11 @@ def configure_logging(level: int = logging.INFO) -> None:
     root.addHandler(app_file_handler)
     root.addHandler(error_file_handler)
     root.setLevel(level)
+
+    # Silence noisy 3rd-party libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    logging.getLogger("msal").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+

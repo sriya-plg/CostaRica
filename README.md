@@ -1,8 +1,22 @@
-# Costa Rica — Graph email subscription webhook (step 1)
+# Costa Rica — Microsoft Graph Email Unread Poller
 
-Detect new email arrival via a Microsoft Graph subscription webhook. Attachment download, XML parsing, and backend integration are stubbed for a later stage.
+Automated email ingestion pipeline for extracting Cardtronics invoice numbers and shipment numbers from incoming XML emails using Microsoft Graph API Unread Polling with `isRead` mark disposition (matching `plg-ml-domestic-order-entry-bot`).
 
-## Project structure
+## Architecture & How It Works
+
+```
+1. Polling (Producer)
+   Timer Tick (every 15s) ──► Query Graph: isRead eq false & receivedDateTime >= (now - lookback_hours)
+                                     │
+2. In-Flight Tracking & Processing   ▼
+   EmailTracker.start() ──► Download Attachments ──► Parse Invoice & Shipment XML ──► Backend API
+                                     │
+3. Disposition (Outcome)             ▼
+   Success ───────────────► Graph API: PATCH isRead=true  &  EmailTracker.complete()
+   Retryable Error ───────► Leave Unread in Outlook for retry on next tick
+```
+
+## Project Structure
 
 ```
 app/
@@ -10,31 +24,24 @@ app/
     config.py
     logging.py
   persistence/                  # Local storage
-    processed_emails.py         # SQLite dedup table
-    subscription_store.py       # JSON subscription state
+    processed_emails.py         # SQLite dedup table (processed_emails.db)
   graph/                        # Microsoft Graph API
-    client.py                   # msal auth + HTTP with retries
-    subscriptions.py            # create / renew subscription calls
-  webhook/                      # Step 1: inbound Graph notifications
-    router.py                   # GET/POST /webhook
-    notifications.py            # validate, dedup, dispatch
-  pipeline/                     # Step 2+: email processing (stubbed)
-    message_processor.py
-  jobs/                         # Scheduled background work
-    subscription_lifecycle.py   # ensure valid + periodic renewal
-  main.py                       # FastAPI app bootstrap
+    client.py                   # MSAL auth + HTTP client with retries
+    messages.py                 # list_unread_emails, mark_message_as_read
+    attachments.py              # fetch attachments
+  pipeline/                     # Email and XML processing pipeline
+    message_processor.py        # Main processing flow
+    subject_parser.py           # Extract shipment numbers from subjects
+    xml_processor.py            # Parse XML attachments (Invoice & AHC XML)
+  jobs/                         # Periodic polling jobs
+    email_poller.py             # EmailTracker & unread email poller
+  main.py                       # FastAPI application & APScheduler runner
 scripts/
-  create_subscription.py        # one-off subscription setup CLI
-data/                           # runtime artifacts (gitignored)
+  poll_once.py                  # Standalone CLI to run a single poll iteration
+data/                           # Runtime artifacts (gitignored)
   processed_emails.db
-  subscription.json
+downloads/                      # Downloaded attachments & result.json
 ```
-
-## Prerequisites
-
-- Python 3.13+
-- An Azure AD app registration with **Application** permission `Mail.Read` (admin consent granted)
-- [ngrok](https://ngrok.com/) (or another HTTPS tunnel) for local webhook delivery
 
 ## Setup
 
@@ -46,49 +53,33 @@ data/                           # runtime artifacts (gitignored)
    pip install -r requirements.txt
    ```
 
-2. Copy `.env.example` to `.env` and fill in values:
+2. Configure `.env`:
 
-   - `MAILBOX` — the mailbox user ID or UPN to watch
-   - `CLIENT_STATE` — a secret string Graph echoes back; must match what the webhook validates
-   - `NOTIFICATION_URL` — public HTTPS URL ending in `/webhook` (set after ngrok is running)
-
-3. Start ngrok and note the HTTPS URL:
-
-   ```powershell
-   ngrok http 8000
+   ```env
+   TENANT_ID=your-azure-tenant-id
+   CLIENT_ID=your-azure-client-id
+   CLIENT_SECRET=your-azure-client-secret
+   MAILBOX=your-monitored-mailbox@domain.com
+   POLL_INTERVAL_SECONDS=15
+   INITIAL_LOOKBACK_HOURS=48
    ```
 
-   Set `NOTIFICATION_URL` in `.env` to `https://<ngrok-host>/webhook`.
-
-4. Create the Graph subscription (also done automatically on server startup if missing/expired):
+3. Run the service:
 
    ```powershell
-   python scripts/create_subscription.py
+   uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
 
-5. Start the FastAPI server:
+4. Or execute a single poll run manually:
 
    ```powershell
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   uv run python scripts/poll_once.py
    ```
 
-   On startup the app ensures a valid subscription exists and schedules renewal every 4 hours when expiry is within one day.
 
-## Test
+## Endpoints
 
-1. Send an email to the monitored mailbox.
-2. Graph POSTs to `/webhook`; the server responds `202` immediately and processes in the background.
-3. Confirm a row in SQLite:
+- `GET /health` — Service health check.
+- `GET /status` — Current polling status, mailbox, and delta state.
+- `POST /poll` — Trigger an immediate poll iteration on-demand.
 
-   ```powershell
-   sqlite3 data/processed_emails.db "SELECT * FROM processed_emails;"
-   ```
-
-   You should see `message_id`, `status='received'`, and `received_at`.
-
-## Webhook behavior
-
-- **GET** `/webhook?validationToken=...` — returns the token as `text/plain` (Graph subscription validation).
-- **POST** `/webhook` — validates `clientState`, deduplicates on `message_id`, inserts `processed_emails`, then calls the stub in `app/pipeline/message_processor.py`.
-
-Subscription state is stored in `data/subscription.json`; processed messages in `data/processed_emails.db`.

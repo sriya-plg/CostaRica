@@ -5,16 +5,10 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 
+from app.core.config import settings
 from app.core.logging import configure_logging
-from app.graph.subscriptions import WebhookNotReachableError
-from app.jobs.subscription_lifecycle import (
-    ensure_valid_subscription,
-    ensure_valid_subscription_at_startup,
-    renew_if_needed,
-)
+from app.jobs.email_poller import poll_new_emails
 from app.persistence.processed_emails import init_db
-from app.persistence.subscription_store import load_subscription
-from app.webhook.router import router as webhook_router
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -22,39 +16,64 @@ logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 
 
-async def _try_create_subscription() -> None:
-    """Create subscription after startup if missing and ngrok/webhook is reachable."""
-    await asyncio.sleep(5)
-    if load_subscription() is not None:
-        return
+def _scheduled_poll_job() -> None:
     try:
-        await asyncio.to_thread(ensure_valid_subscription)
-    except WebhookNotReachableError as exc:
-        logger.warning(
-            "Subscription not created — webhook not reachable: %s. "
-            "Start ngrok, set NOTIFICATION_URL in .env, then run: "
-            "python scripts/create_subscription.py",
-            exc,
-        )
-    except Exception:
-        logger.exception(
-            "Subscription creation failed. Run: python scripts/create_subscription.py"
-        )
+        poll_new_emails()
+    except Exception as exc:
+        logger.exception("Error during scheduled email poll: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    ensure_valid_subscription_at_startup()
-    scheduler.add_job(renew_if_needed, "interval", hours=4, id="renew_subscription")
+    logger.info("Database initialized")
+
+    # Start background polling scheduler
+    scheduler.add_job(
+        _scheduled_poll_job,
+        "interval",
+        seconds=settings.POLL_INTERVAL_SECONDS,
+        id="email_unread_poller",
+        replace_existing=True,
+    )
     scheduler.start()
-    create_task = asyncio.create_task(_try_create_subscription())
+    logger.info(
+        "Started background email poller with interval=%ss, lookback=%sh",
+        settings.POLL_INTERVAL_SECONDS,
+        settings.INITIAL_LOOKBACK_HOURS,
+    )
+
+    # Trigger an immediate first poll in the background after startup
+    asyncio.create_task(asyncio.to_thread(_scheduled_poll_job))
+
     logger.info("Application startup complete")
     yield
-    create_task.cancel()
+
     scheduler.shutdown(wait=False)
     logger.info("Application shutdown complete")
 
 
-app = FastAPI(title="Costa Rica Graph Webhook", lifespan=lifespan)
-app.include_router(webhook_router)
+app = FastAPI(title="Costa Rica Email Poller", lifespan=lifespan)
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "costa-rica-email-poller"}
+
+
+@app.get("/status")
+def status():
+    return {
+        "poll_interval_seconds": settings.POLL_INTERVAL_SECONDS,
+        "lookback_hours": settings.INITIAL_LOOKBACK_HOURS,
+        "mailbox": settings.MAILBOX,
+    }
+
+
+@app.post("/poll")
+def trigger_poll():
+    """Manually trigger a poll iteration on-demand."""
+    count = poll_new_emails()
+    return {"status": "success", "processed_count": count}
+
+

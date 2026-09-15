@@ -23,8 +23,6 @@ app/
   core/                         # App-wide config and logging
     config.py
     logging.py
-  persistence/                  # Local storage
-    processed_emails.py         # SQLite dedup table (processed_emails.db)
   graph/                        # Microsoft Graph API
     client.py                   # MSAL auth + HTTP client with retries
     messages.py                 # list_unread_emails, mark_message_as_read
@@ -38,8 +36,6 @@ app/
   main.py                       # FastAPI application & APScheduler runner
 scripts/
   poll_once.py                  # Standalone CLI to run a single poll iteration
-data/                           # Runtime artifacts (gitignored)
-  processed_emails.db
 downloads/                      # Downloaded attachments & result.json
 ```
 

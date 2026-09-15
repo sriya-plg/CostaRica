@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.jobs.email_poller import poll_new_emails
-from app.persistence.processed_emails import init_db
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -25,8 +24,6 @@ def _scheduled_poll_job() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    logger.info("Database initialized")
 
     # Start background polling scheduler
     scheduler.add_job(

@@ -2,25 +2,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.jobs.email_poller import EmailTracker, poll_new_emails, process_one_email, tracker
-from app.persistence.processed_emails import (
-    _get_db,
-    get_processed_email,
-    init_db,
-    insert_processed_email,
-)
 
 
 class TestEmailPollerUnread(unittest.TestCase):
     def setUp(self):
-        init_db()
-        with _get_db() as conn:
-            conn.execute("DELETE FROM processed_emails WHERE message_id LIKE 'msg_%'")
-            conn.commit()
+        tracker._in_flight.clear()
 
     def tearDown(self):
-        with _get_db() as conn:
-            conn.execute("DELETE FROM processed_emails WHERE message_id LIKE 'msg_%'")
-            conn.commit()
+        tracker._in_flight.clear()
 
     @patch("app.jobs.email_poller.mark_message_as_read")
     @patch("app.jobs.email_poller.process_new_message")
@@ -40,22 +29,17 @@ class TestEmailPollerUnread(unittest.TestCase):
         mock_mark_read.assert_any_call("msg_unread_1")
         mock_mark_read.assert_any_call("msg_unread_2")
 
-        row1 = get_processed_email("msg_unread_1")
-        row2 = get_processed_email("msg_unread_2")
-        self.assertIsNotNone(row1)
-        self.assertIsNotNone(row2)
-
     @patch("app.jobs.email_poller.mark_message_as_read")
     @patch("app.jobs.email_poller.process_new_message")
-    def test_already_processed_in_db_marks_as_read_and_skips(
+    def test_in_flight_message_is_skipped(
         self, mock_process, mock_mark_read
     ):
-        insert_processed_email("msg_already_done", status="processed")
+        tracker.start("msg_in_flight")
 
-        result = process_one_email({"id": "msg_already_done", "subject": "Done"})
+        result = process_one_email({"id": "msg_in_flight", "subject": "In flight"})
         self.assertFalse(result)
         mock_process.assert_not_called()
-        mock_mark_read.assert_called_once_with("msg_already_done")
+        mock_mark_read.assert_not_called()
 
     @patch("app.jobs.email_poller.mark_message_as_read")
     @patch("app.jobs.email_poller.process_new_message")

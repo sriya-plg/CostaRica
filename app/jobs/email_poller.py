@@ -4,7 +4,6 @@ from typing import Any
 
 from app.core.config import settings
 from app.graph.messages import list_unread_emails, mark_message_as_read
-from app.persistence.processed_emails import get_processed_email, insert_processed_email
 from app.pipeline.message_processor import process_new_message
 
 logger = logging.getLogger(__name__)
@@ -42,29 +41,18 @@ def process_one_email(message: dict[str, Any]) -> bool:
     if not message_id:
         return False
 
-    # Check if already processed in database
-    existing_row = get_processed_email(message_id)
-    if existing_row and existing_row["status"] == "processed":
-        logger.info("Message %s already processed in DB; ensuring isRead=true in Outlook", message_id)
-        try:
-            mark_message_as_read(message_id)
-        except Exception as exc:
-            logger.warning("Could not mark duplicate message %s as read: %s", message_id, exc)
-        return False
-
-    # Acquire reservation
+    # Acquire atomic reservation
     if not tracker.start(message_id):
         logger.debug("Message %s is already in-flight, skipping", message_id)
         return False
 
     try:
-        insert_processed_email(message_id, status="received")
         logger.info(
-            "Starting processing for unread email message_id=%s subject=%r",
-            message_id,
+            "Processing unread email [%s...] Subject: %r",
+            message_id[:16],
             message.get("subject"),
         )
-        process_new_message(message_id)
+        process_new_message(message_id, received_at=message.get("receivedDateTime"))
 
         # Disposition: Success -> Mark isRead=true in Outlook
         try:

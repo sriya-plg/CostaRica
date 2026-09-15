@@ -2,14 +2,10 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.persistence.processed_emails import get_processed_email, init_db, insert_processed_email
 from app.pipeline.message_processor import process_new_message
 
 
 class TestMessageProcessorIntegration(unittest.TestCase):
-    def setUp(self):
-        init_db()
-
     @patch("app.pipeline.message_processor.get_message_details")
     @patch("app.pipeline.message_processor.get_attachments")
     @patch("app.pipeline.message_processor.save_attachment")
@@ -17,7 +13,6 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         self, mock_save_att, mock_get_att, mock_get_msg
     ):
         message_id = "test_msg_non_s_subject"
-        insert_processed_email(message_id, status="received")
 
         # Subject does NOT start with S
         mock_get_msg.return_value = {
@@ -48,18 +43,11 @@ class TestMessageProcessorIntegration(unittest.TestCase):
 
         mock_save_att.side_effect = mock_save_side_effect
 
-        process_new_message(message_id)
+        result_data = process_new_message(message_id)
 
-        row = get_processed_email(message_id)
-        self.assertIsNotNone(row)
-        self.assertEqual(row["status"], "processed")
-        # Should fallback to XML OtroTexto value SCSR00306822
-        self.assertEqual(row["shipment_number"], "SCSR00306822")
-        self.assertEqual(row["invoice_number"], "00100001010000050276")
-
-        result_data = json.loads(row["result_json"])
         self.assertEqual(result_data["shipment_source"], "xml_otro_texto")
         self.assertEqual(result_data["shipment_number"], "SCSR00306822")
+        self.assertEqual(result_data["invoice_number"], "00100001010000050276")
 
     @patch("app.pipeline.message_processor.get_message_details")
     @patch("app.pipeline.message_processor.get_attachments")
@@ -68,7 +56,6 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         self, mock_save_att, mock_get_att, mock_get_msg
     ):
         message_id = "test_msg_s_subject"
-        insert_processed_email(message_id, status="received")
 
         # Subject starts with S
         mock_get_msg.return_value = {
@@ -92,14 +79,11 @@ class TestMessageProcessorIntegration(unittest.TestCase):
 
         mock_save_att.side_effect = mock_save_side_effect
 
-        process_new_message(message_id)
+        result_data = process_new_message(message_id)
 
-        row = get_processed_email(message_id)
-        self.assertIsNotNone(row)
-        self.assertEqual(row["shipment_number"], "SCSR99999999")
-
-        result_data = json.loads(row["result_json"])
+        self.assertEqual(result_data["shipment_number"], "SCSR99999999")
         self.assertEqual(result_data["shipment_source"], "subject")
+        self.assertEqual(result_data["invoice_number"], "00100001010000050277")
 
 
 if __name__ == "__main__":

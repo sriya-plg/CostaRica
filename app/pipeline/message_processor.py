@@ -7,11 +7,6 @@ from app.backend.client import report_attachment_details, report_shipment_invoic
 from app.core.timezone import local_iso
 from app.graph.attachments import get_attachments
 from app.graph.messages import get_message_details
-from app.persistence.processed_emails import (
-    get_processed_email,
-    update_processed_email_results,
-    update_processed_email_status,
-)
 from app.pipeline.subject_parser import extract_shipment_number
 from app.pipeline.xml_processor import process_xml_attachments
 from app.storage.attachments import make_email_download_dir, save_attachment
@@ -29,13 +24,9 @@ def _attachment_meta(attachment: dict[str, Any], saved_path: str) -> dict[str, A
     }
 
 
-def process_new_message(message_id: str) -> None:
-    row = get_processed_email(message_id)
-    if row is None:
-        logger.error("message_id=%s not found in processed_emails", message_id)
-        return
-
-    received_at = row["received_at"]
+def process_new_message(message_id: str, received_at: str | None = None) -> dict[str, Any]:
+    """Process an email: download attachments, parse XMLs, extract invoice/shipment, and dispatch to backend."""
+    timestamp = received_at or local_iso()
 
     # Step 1: Fetch message details and parse subject
     subject: str | None = None
@@ -60,12 +51,11 @@ def process_new_message(message_id: str) -> None:
     # Fetch attachments
     attachments = get_attachments(message_id)
     if not attachments:
-        update_processed_email_status(message_id, "no_attachments")
         logger.info("message_id=%s has no file attachments", message_id)
-        return
+        return {}
 
     # Download attachments into timestamped directory
-    dest_dir = make_email_download_dir(received_at)
+    dest_dir = make_email_download_dir(timestamp)
     downloaded = 0
     for attachment in attachments:
         saved_path = save_attachment(attachment, dest_dir)
@@ -97,7 +87,6 @@ def process_new_message(message_id: str) -> None:
         shipment_number = xml_shipment_ref
         shipment_source = "xml_otro_texto"
     elif subject_shipment:
-        # Fallback to subject shipment even if not starting with S if XML had none
         shipment_number = subject_shipment
         shipment_source = "subject_non_s_fallback"
 
@@ -140,15 +129,6 @@ def process_new_message(message_id: str) -> None:
     result_json_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
     logger.info("Saved extraction result to %s", result_json_file)
 
-    # Update SQLite database
-    update_processed_email_results(
-        message_id=message_id,
-        status="processed",
-        subject=subject,
-        shipment_number=shipment_number,
-        invoice_number=invoice_number,
-        result_data=result_payload,
-    )
-
     # Dispatch to backend client
     report_shipment_invoice(result_payload)
+    return result_payload

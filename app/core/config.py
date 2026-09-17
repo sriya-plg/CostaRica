@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     SUBSCRIPTION_FILE: str = "data/subscription.json"
     LOG_DIR: str = "logs"
     APP_PORT: int = 8000
+    ATTACHMENTS_DIR: str = "downloads"
+    TIMEZONE: str = "America/Chicago"
 
 
 settings = Settings()

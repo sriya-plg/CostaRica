@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     LOG_DIR: str = "logs"
     ATTACHMENTS_DIR: str = "downloads"
     TIMEZONE: str = "America/Chicago"
+    CORE_DATA_BASE_URL: str = "https://plgtst.pegasuslogistics.com/api/orderentry"
+    CORE_DATA_BILL_TO: int = 0
 
 
 settings = Settings()

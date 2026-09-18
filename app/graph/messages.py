@@ -51,7 +51,7 @@ def mark_message_as_read(message_id: str) -> None:
 
 def get_message_details(message_id: str) -> dict[str, Any]:
     """Fetch email details such as subject, sender, and received time from Microsoft Graph."""
-    path = f"/users/{settings.MAILBOX}/messages/{message_id}?$select=id,subject,receivedDateTime,hasAttachments,from,isRead"
+    path = f"/users/{settings.MAILBOX}/messages/{message_id}?$select=id,subject,receivedDateTime,hasAttachments,from,isRead,bodyPreview"
     logger.debug("Fetching message details for message_id=%s", message_id)
     return graph_client.request("GET", path)
 

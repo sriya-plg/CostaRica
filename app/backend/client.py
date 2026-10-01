@@ -125,6 +125,65 @@ class CoreDataClient:
             )
             return None
 
+    def update_activity_ml_process(
+        self,
+        activity_id: int,
+        email_log_id: int,
+        attachment_id: int,
+        bill_to: int | None = None,
+        ml_status: int = 3,
+        ml_request: dict[str, Any] | None = None,
+        ml_log: str = "ML extraction completed successfully.",
+        ml_error: str | None = None,
+        ml_process_started_on: str | None = None,
+        ml_process_completed_on: str | None = None,
+        ml_completion_time_in_secs: int | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        POST /UpdateCoreDataActivityMlProcess
+        Updates the ML processing results, status, and extracted fields for an activity.
+        """
+        url = f"{self.base_url}/UpdateCoreDataActivityMlProcess"
+        bill_to_val = bill_to if bill_to is not None else settings.CORE_DATA_BILL_TO
+        payload = {
+            "activityId": activity_id,
+            "emailLogId": email_log_id,
+            "attachmentId": attachment_id,
+            "billTo": bill_to_val,
+            "mlStatus": ml_status,
+            "mlRequest": ml_request or {},
+            "mlLog": ml_log,
+            "mlError": ml_error,
+            "mlProcessStartedOn": ml_process_started_on,
+            "mlProcessCompletedOn": ml_process_completed_on,
+            "mlCompletionTimeInSecs": ml_completion_time_in_secs,
+        }
+
+        logger.info(
+            "Calling UpdateCoreDataActivityMlProcess: url=%s activityId=%s payload=%s",
+            url,
+            activity_id,
+            payload,
+        )
+
+        try:
+            resp = httpx.post(url, json=payload, timeout=15.0)
+            resp.raise_for_status()
+            data = resp.json()
+            logger.info(
+                "UpdateCoreDataActivityMlProcess response for activityId=%s: %s",
+                activity_id,
+                data,
+            )
+            return data if isinstance(data, dict) else {"response": data}
+        except Exception as exc:
+            logger.error(
+                "Failed to execute UpdateCoreDataActivityMlProcess for activityId=%s: %s",
+                activity_id,
+                exc,
+            )
+            return None
+
 
 core_data_client = CoreDataClient()
 

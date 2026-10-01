@@ -80,6 +80,43 @@ class TestCoreDataClient(unittest.TestCase):
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload, {"emailLogId": 8, "attachmentId": 123, "billTo": 0})
 
+    @patch("httpx.post")
+    def test_update_activity_ml_process_success(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"success": True, "message": "ML status updated"}
+        mock_post.return_value = mock_response
+
+        result = self.client.update_activity_ml_process(
+            activity_id=100234,
+            email_log_id=550012,
+            attachment_id=900871,
+            bill_to=0,
+            ml_status=3,
+            ml_request={
+                "invoiceKey": "INV-2026-004512",
+                "shipmentNo": "SHP-778341",
+                "referenceNo": "REF-90876",
+            },
+            ml_log="ML extraction completed successfully.",
+            ml_error=None,
+            ml_process_started_on="2026-09-28T09:14:02Z",
+            ml_process_completed_on="2026-09-28T09:14:37Z",
+            ml_completion_time_in_secs=35,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("success"))
+        mock_post.assert_called_once()
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["activityId"], 100234)
+        self.assertEqual(payload["emailLogId"], 550012)
+        self.assertEqual(payload["attachmentId"], 900871)
+        self.assertEqual(payload["billTo"], 0)
+        self.assertEqual(payload["mlStatus"], 3)
+        self.assertEqual(payload["mlRequest"]["invoiceKey"], "INV-2026-004512")
+        self.assertEqual(payload["mlCompletionTimeInSecs"], 35)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -30,7 +31,8 @@ def _attachment_meta(attachment: dict[str, Any], saved_path: str) -> dict[str, A
 
 
 def process_new_message(message_id: str, received_at: str | None = None) -> dict[str, Any]:
-    """Process an email: log to Core Data, retrieve attachment list, download attachments, parse XMLs, add activity, and dispatch to backend."""
+    """Process an email: log to Core Data, retrieve attachment list, download attachments, parse XMLs, add activity, update ML process, and dispatch to backend."""
+    process_started_dt = datetime.now(timezone.utc)
     timestamp = received_at or local_iso()
 
     # Step 1: Fetch message details and parse subject
@@ -136,7 +138,7 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         message_id,
     )
 
-    # --- Core Data API 3: Add Activity ---
+    # --- Core Data API 3: Add Activity & API 4: Update ML Process ---
     activities_created: list[dict[str, Any]] = []
     if email_log_id is not None and core_data_attachments:
         for cd_att in core_data_attachments:
@@ -147,10 +149,51 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
                     attachment_id=int(att_id),
                     bill_to=settings.CORE_DATA_BILL_TO,
                 )
+
+                # Extract activityId from AddCoreDataActivity response
+                activity_id: int | None = None
+                if isinstance(act_resp, dict):
+                    raw_id = act_resp.get("activityId") or act_resp.get("id") or act_resp.get("data")
+                    if raw_id is not None:
+                        try:
+                            activity_id = int(raw_id)
+                        except (ValueError, TypeError):
+                            activity_id = None
+                elif isinstance(act_resp, (int, str)) and str(act_resp).isdigit():
+                    activity_id = int(act_resp)
+
+                # Execute UpdateCoreDataActivityMlProcess
+                ml_resp = None
+                if activity_id is not None:
+                    process_completed_dt = datetime.now(timezone.utc)
+                    elapsed_seconds = max(0, int((process_completed_dt - process_started_dt).total_seconds()))
+
+                    ml_request = {
+                        "invoiceKey": invoice_number or "",
+                        "shipmentNo": shipment_number or "",
+                        "referenceNo": xml_shipment_ref or "",
+                    }
+
+                    ml_resp = core_data_client.update_activity_ml_process(
+                        activity_id=activity_id,
+                        email_log_id=email_log_id,
+                        attachment_id=int(att_id),
+                        bill_to=settings.CORE_DATA_BILL_TO,
+                        ml_status=3,
+                        ml_request=ml_request,
+                        ml_log="ML extraction completed successfully.",
+                        ml_error=None,
+                        ml_process_started_on=process_started_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        ml_process_completed_on=process_completed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        ml_completion_time_in_secs=elapsed_seconds,
+                    )
+
                 activities_created.append({
                     "attachmentId": att_id,
                     "fileName": cd_att.get("fileName"),
+                    "activityId": activity_id,
                     "activityResponse": act_resp,
+                    "mlProcessResponse": ml_resp,
                 })
 
     # Print formatted extraction summary card to terminal

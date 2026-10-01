@@ -34,7 +34,17 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         mock_post_activity.status_code = 200
         mock_post_activity.json.return_value = {"activityId": 5001}
 
-        mock_http_post.side_effect = [mock_post_email, mock_post_activity, mock_post_activity]
+        mock_post_ml = MagicMock()
+        mock_post_ml.status_code = 200
+        mock_post_ml.json.return_value = {"success": True}
+
+        mock_http_post.side_effect = [
+            mock_post_email,
+            mock_post_activity,
+            mock_post_ml,
+            mock_post_activity,
+            mock_post_ml,
+        ]
         mock_http_get.return_value = mock_get_att_list
 
         # Subject does NOT start with S
@@ -104,7 +114,11 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         mock_post_activity.status_code = 200
         mock_post_activity.json.return_value = {"activityId": 6001}
 
-        mock_http_post.side_effect = [mock_post_email, mock_post_activity]
+        mock_post_ml = MagicMock()
+        mock_post_ml.status_code = 200
+        mock_post_ml.json.return_value = {"success": True}
+
+        mock_http_post.side_effect = [mock_post_email, mock_post_activity, mock_post_ml]
         mock_http_get.return_value = mock_get_att_list
 
         # Subject starts with S

@@ -1,9 +1,15 @@
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from app.backend.client import report_attachment_details, report_shipment_invoice
+from app.backend.client import (
+    core_data_client,
+    report_attachment_details,
+    report_shipment_invoice,
+)
+from app.core.config import settings
 from app.core.timezone import local_iso
 from app.graph.attachments import get_attachments
 from app.graph.messages import get_message_details
@@ -25,19 +31,32 @@ def _attachment_meta(attachment: dict[str, Any], saved_path: str) -> dict[str, A
 
 
 def process_new_message(message_id: str, received_at: str | None = None) -> dict[str, Any]:
-    """Process an email: download attachments, parse XMLs, extract invoice/shipment, and dispatch to backend."""
+    """Process an email: log to Core Data, retrieve attachment list, download attachments, parse XMLs, add activity, update ML process, and dispatch to backend."""
+    process_started_dt = datetime.now(timezone.utc)
     timestamp = received_at or local_iso()
 
     # Step 1: Fetch message details and parse subject
     subject: str | None = None
     subject_shipment: str | None = None
+    sender_email: str = ""
+    body_preview: str = ""
+    received_datetime: str = timestamp
+    msg_details: dict[str, Any] = {}
+
     try:
         msg_details = get_message_details(message_id)
         subject = msg_details.get("subject")
         subject_shipment = extract_shipment_number(subject)
+        sender_info = msg_details.get("from")
+        if isinstance(sender_info, dict):
+            sender_email = sender_info.get("emailAddress", {}).get("address", "")
+        body_preview = msg_details.get("bodyPreview") or ""
+        received_datetime = msg_details.get("receivedDateTime") or timestamp
+
         logger.info(
-            "message_id=%s subject=%r -> parsed subject_shipment=%s",
+            "message_id=%s sender=%s subject=%r -> parsed subject_shipment=%s",
             message_id,
+            sender_email,
             subject,
             subject_shipment,
         )
@@ -48,11 +67,33 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
             exc,
         )
 
-    # Fetch attachments
+    # Fetch attachments from Graph
     attachments = get_attachments(message_id)
     if not attachments:
         logger.info("message_id=%s has no file attachments", message_id)
         return {}
+
+    attachment_filenames = [att.get("name") for att in attachments if att.get("name")]
+
+    # --- Core Data API 1: Add Email Log ---
+    email_log_id = core_data_client.add_email_log(
+        email=sender_email,
+        email_subject=subject or "",
+        email_body=body_preview,
+        email_received_on=received_datetime,
+        attachment_filenames=attachment_filenames,
+    )
+    logger.info("message_id=%s -> Core Data emailLogId=%s", message_id, email_log_id)
+
+    # --- Core Data API 2: Get Attachment List ---
+    core_data_attachments: list[dict[str, Any]] = []
+    if email_log_id is not None:
+        core_data_attachments = core_data_client.get_attachment_list(email_log_id)
+        logger.info(
+            "emailLogId=%s returned %d attachment(s) from Core Data",
+            email_log_id,
+            len(core_data_attachments),
+        )
 
     # Download attachments into timestamped directory
     dest_dir = make_email_download_dir(timestamp)
@@ -97,21 +138,84 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         message_id,
     )
 
+    # --- Core Data API 3: Add Activity & API 4: Update ML Process ---
+    activities_created: list[dict[str, Any]] = []
+    if email_log_id is not None and core_data_attachments:
+        for cd_att in core_data_attachments:
+            att_id = cd_att.get("attachmentId")
+            if att_id is not None:
+                act_resp = core_data_client.add_activity(
+                    email_log_id=email_log_id,
+                    attachment_id=int(att_id),
+                    bill_to=settings.CORE_DATA_BILL_TO,
+                )
+
+                # Extract activityId from AddCoreDataActivity response
+                activity_id: int | None = None
+                if isinstance(act_resp, dict):
+                    raw_id = act_resp.get("activityId") or act_resp.get("id") or act_resp.get("data")
+                    if raw_id is not None:
+                        try:
+                            activity_id = int(raw_id)
+                        except (ValueError, TypeError):
+                            activity_id = None
+                elif isinstance(act_resp, (int, str)) and str(act_resp).isdigit():
+                    activity_id = int(act_resp)
+
+                # Execute UpdateCoreDataActivityMlProcess
+                ml_resp = None
+                if activity_id is not None:
+                    process_completed_dt = datetime.now(timezone.utc)
+                    elapsed_seconds = max(0, int((process_completed_dt - process_started_dt).total_seconds()))
+
+                    ml_request = {
+                        "invoiceKey": invoice_number or "",
+                        "shipmentNo": shipment_number or "",
+                        "referenceNo": xml_shipment_ref or "",
+                    }
+
+                    ml_resp = core_data_client.update_activity_ml_process(
+                        activity_id=activity_id,
+                        email_log_id=email_log_id,
+                        attachment_id=int(att_id),
+                        bill_to=settings.CORE_DATA_BILL_TO,
+                        ml_status=3,
+                        ml_request=ml_request,
+                        ml_log="ML extraction completed successfully.",
+                        ml_error=None,
+                        ml_process_started_on=process_started_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        ml_process_completed_on=process_completed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        ml_completion_time_in_secs=elapsed_seconds,
+                    )
+
+                activities_created.append({
+                    "attachmentId": att_id,
+                    "fileName": cd_att.get("fileName"),
+                    "activityId": activity_id,
+                    "activityResponse": act_resp,
+                    "mlProcessResponse": ml_resp,
+                })
+
     # Print formatted extraction summary card to terminal
     print("\n" + "=" * 65, flush=True)
     print("  ORDER DATA EXTRACTED (Cardtronics Costa Rica)", flush=True)
     print("=" * 65, flush=True)
-    print(f"  Email Subject    : {subject}", flush=True)
-    print(f"  Shipment Number  : {shipment_number} (source: {shipment_source})", flush=True)
-    print(f"  Invoice Number   : {invoice_number} (from <NumeroConsecutivo>)", flush=True)
-    print(f"  Invoice XML      : {xml_results.get('invoice_xml')}", flush=True)
-    print(f"  AHC XML          : {xml_results.get('ahc_xml')}", flush=True)
-    print(f"  Downloads Folder : {dest_dir}", flush=True)
+    print(f"  Email Subject       : {subject}", flush=True)
+    print(f"  Core Data EmailLogId: {email_log_id}", flush=True)
+    print(f"  Shipment Number     : {shipment_number} (source: {shipment_source})", flush=True)
+    print(f"  Invoice Number      : {invoice_number} (from <NumeroConsecutivo>)", flush=True)
+    print(f"  Invoice XML         : {xml_results.get('invoice_xml')}", flush=True)
+    print(f"  AHC XML             : {xml_results.get('ahc_xml')}", flush=True)
+    print(f"  Downloads Folder    : {dest_dir}", flush=True)
+    print(f"  Activities Created  : {len(activities_created)}", flush=True)
     print("=" * 65 + "\n", flush=True)
 
     # Assemble structured JSON result
     result_payload = {
         "message_id": message_id,
+        "email_log_id": email_log_id,
+        "core_data_attachments": core_data_attachments,
+        "activities_created": activities_created,
         "subject": subject,
         "shipment_number": shipment_number,
         "shipment_source": shipment_source,

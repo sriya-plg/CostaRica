@@ -16,6 +16,7 @@ from app.graph.messages import get_message_details
 from app.pipeline.subject_parser import extract_shipment_number
 from app.pipeline.xml_processor import process_xml_attachments
 from app.storage.attachments import make_email_download_dir, save_attachment
+from app.storage.azure_blob import upload_pdf_to_azure
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,42 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         logger.info("message_id=%s has no file attachments", message_id)
         return {}
 
-    attachment_filenames = [att.get("name") for att in attachments if att.get("name")]
+    # Download attachments into timestamped directory
+    dest_dir = make_email_download_dir(timestamp)
+    downloaded = 0
+    saved_attachments: list[tuple[dict[str, Any], Path]] = []
+    for attachment in attachments:
+        saved_path = save_attachment(attachment, dest_dir)
+        report_attachment_details(message_id, _attachment_meta(attachment, str(saved_path)))
+        saved_attachments.append((attachment, saved_path))
+        downloaded += 1
+
+    logger.info(
+        "message_id=%s downloaded %s attachment(s) to %s",
+        message_id,
+        downloaded,
+        dest_dir,
+    )
+
+    # Prepare attachment filenames for Core Data:
+    # Rule: For PDF attachments, upload to Azure Blob (container plgaiml1/cwdocs)
+    # and pass the path 'plgaiml1/cwdocs/<filename>' (no date) to AddCoreDataEmailLog.
+    # For XML/other attachments, pass the original filename.
+    attachment_filenames: list[str] = []
+    uploaded_blobs: dict[str, str] = {}
+    for attachment, saved_path in saved_attachments:
+        att_name = attachment.get("name") or saved_path.name
+        if saved_path.suffix.lower() == ".pdf":
+            blob_path = upload_pdf_to_azure(saved_path, dest_dir.name)
+            uploaded_blobs[att_name] = blob_path
+            attachment_filenames.append(blob_path)
+            logger.info(
+                "Uploaded PDF %s to Azure Blob: path=%s -> AddCoreDataEmailLog fileName",
+                att_name,
+                blob_path,
+            )
+        else:
+            attachment_filenames.append(att_name)
 
     # --- Core Data API 1: Add Email Log ---
     email_log_id = core_data_client.add_email_log(
@@ -94,21 +130,6 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
             email_log_id,
             len(core_data_attachments),
         )
-
-    # Download attachments into timestamped directory
-    dest_dir = make_email_download_dir(timestamp)
-    downloaded = 0
-    for attachment in attachments:
-        saved_path = save_attachment(attachment, dest_dir)
-        report_attachment_details(message_id, _attachment_meta(attachment, str(saved_path)))
-        downloaded += 1
-
-    logger.info(
-        "message_id=%s downloaded %s attachment(s) to %s",
-        message_id,
-        downloaded,
-        dest_dir,
-    )
 
     # Step 2: Process XML attachments (Invoice & AHC XML, extract NumeroConsecutivo & OtroTexto REF:S...)
     xml_results = process_xml_attachments(dest_dir)
@@ -207,6 +228,8 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     print(f"  Invoice XML         : {xml_results.get('invoice_xml')}", flush=True)
     print(f"  AHC XML             : {xml_results.get('ahc_xml')}", flush=True)
     print(f"  Downloads Folder    : {dest_dir}", flush=True)
+    if uploaded_blobs:
+        print(f"  Azure Blobs (PDF)   : {', '.join(uploaded_blobs.values())}", flush=True)
     print(f"  Activities Created  : {len(activities_created)}", flush=True)
     print("=" * 65 + "\n", flush=True)
 
@@ -223,6 +246,7 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         "invoice_xml": xml_results.get("invoice_xml"),
         "ahc_xml": xml_results.get("ahc_xml"),
         "download_directory": str(dest_dir),
+        "uploaded_blobs": uploaded_blobs,
         "xml_files_found": xml_results.get("xml_files_found", 0),
         "ignored_files": xml_results.get("ignored_files", []),
         "processed_at": local_iso(),

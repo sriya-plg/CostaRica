@@ -6,14 +6,18 @@ from app.pipeline.message_processor import process_new_message
 
 
 class TestMessageProcessorIntegration(unittest.TestCase):
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
     @patch("app.backend.client.httpx.post")
     @patch("app.backend.client.httpx.get")
     @patch("app.pipeline.message_processor.get_message_details")
     @patch("app.pipeline.message_processor.get_attachments")
     @patch("app.pipeline.message_processor.save_attachment")
     def test_fallback_to_xml_when_subject_not_starting_with_s(
-        self, mock_save_att, mock_get_att, mock_get_msg, mock_http_get, mock_http_post
+        self, mock_save_att, mock_get_att, mock_get_msg, mock_http_get, mock_http_post, mock_upload_pdf
     ):
+        mock_upload_pdf.return_value = (
+            "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf"
+        )
         message_id = "test_msg_non_s_subject"
 
         # Mock Core Data API calls
@@ -86,6 +90,20 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         self.assertEqual(result_data["invoice_number"], "00100001010000050276")
         self.assertEqual(result_data["email_log_id"], 8)
         self.assertEqual(len(result_data["activities_created"]), 2)
+        mock_upload_pdf.assert_called_once()
+        self.assertIn("FE-50276.pdf", result_data["uploaded_blobs"])
+        self.assertEqual(
+            result_data["uploaded_blobs"]["FE-50276.pdf"],
+            "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf",
+        )
+        # Verify AddCoreDataEmailLog payload received the Azure Blob URL for the PDF
+        first_post_payload = mock_http_post.call_args_list[0].kwargs["json"]
+        filenames_sent = [att["fileName"] for att in first_post_payload["attachments"]]
+        self.assertIn("FE-50276.xml", filenames_sent)
+        self.assertIn(
+            "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf",
+            filenames_sent,
+        )
 
     @patch("app.backend.client.httpx.post")
     @patch("app.backend.client.httpx.get")

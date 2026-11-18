@@ -14,7 +14,7 @@ from app.core.timezone import local_iso
 from app.graph.attachments import get_attachments
 from app.graph.messages import get_message_details
 from app.pipeline.subject_parser import extract_shipment_number
-from app.pipeline.xml_processor import process_xml_attachments
+from app.pipeline.xml_processor import extract_shipment_from_pdfs, process_xml_attachments
 from app.storage.attachments import make_email_download_dir, save_attachment
 from app.storage.azure_blob import upload_pdf_to_azure
 
@@ -47,7 +47,12 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     try:
         msg_details = get_message_details(message_id)
         subject = msg_details.get("subject")
-        subject_shipment = extract_shipment_number(subject)
+        raw_subject_shipment = extract_shipment_number(subject)
+        subject_shipment = (
+            raw_subject_shipment
+            if raw_subject_shipment and raw_subject_shipment.upper().startswith("S")
+            else None
+        )
         sender_info = msg_details.get("from")
         if isinstance(sender_info, dict):
             sender_email = sender_info.get("emailAddress", {}).get("address", "")
@@ -131,14 +136,17 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
             len(core_data_attachments),
         )
 
-    # Step 2: Process XML attachments (Invoice & AHC XML, extract NumeroConsecutivo & OtroTexto REF:S...)
+    # Step 2: Process XML attachments (Invoice & AHC XML, extract NumeroConsecutivo, OtroTexto REF:S..., & referenceNo)
     xml_results = process_xml_attachments(dest_dir)
     invoice_number = xml_results.get("invoice_number")
     xml_shipment_ref = xml_results.get("shipment_reference")
+    reference_number = xml_results.get("reference_number")
 
     # Determine final Shipment Number:
-    # Rule: Check subject first; if it exists and starts with 'S', use it.
-    # Otherwise fallback to XML <OtroTexto> REF:S...
+    # Rule:
+    # 1. Check subject first; it must start with 'S', otherwise blank until XML extraction.
+    # 2. Fallback to XML <OtroTexto> REF:S...
+    # 3. Fallback to PDF attachments for 'S...' numbers in Shipment/Invoice/Waybill fields.
     shipment_number: str | None = None
     shipment_source: str = "not_found"
 
@@ -148,9 +156,11 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     elif xml_shipment_ref and xml_shipment_ref.upper().startswith("S"):
         shipment_number = xml_shipment_ref
         shipment_source = "xml_otro_texto"
-    elif subject_shipment:
-        shipment_number = subject_shipment
-        shipment_source = "subject_non_s_fallback"
+    else:
+        pdf_shipment = extract_shipment_from_pdfs(dest_dir)
+        if pdf_shipment and pdf_shipment.upper().startswith("S"):
+            shipment_number = pdf_shipment
+            shipment_source = "pdf"
 
     logger.info(
         "Final resolved shipment_number=%s (source=%s) for message_id=%s",
@@ -192,7 +202,7 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
                     ml_request = {
                         "invoiceKey": invoice_number or "",
                         "shipmentNo": shipment_number or "",
-                        "referenceNo": xml_shipment_ref or "",
+                        "referenceNo": reference_number or "",
                     }
 
                     ml_resp = core_data_client.update_activity_ml_process(
@@ -225,6 +235,7 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     print(f"  Core Data EmailLogId: {email_log_id}", flush=True)
     print(f"  Shipment Number     : {shipment_number} (source: {shipment_source})", flush=True)
     print(f"  Invoice Number      : {invoice_number} (from <NumeroConsecutivo>)", flush=True)
+    print(f"  Reference Number    : {reference_number} (from <OtroTexto codigo>)", flush=True)
     print(f"  Invoice XML         : {xml_results.get('invoice_xml')}", flush=True)
     print(f"  AHC XML             : {xml_results.get('ahc_xml')}", flush=True)
     print(f"  Downloads Folder    : {dest_dir}", flush=True)
@@ -243,6 +254,7 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         "shipment_number": shipment_number,
         "shipment_source": shipment_source,
         "invoice_number": invoice_number,
+        "reference_number": reference_number,
         "invoice_xml": xml_results.get("invoice_xml"),
         "ahc_xml": xml_results.get("ahc_xml"),
         "download_directory": str(dest_dir),

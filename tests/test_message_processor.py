@@ -97,13 +97,12 @@ class TestMessageProcessorIntegration(unittest.TestCase):
             result_data["uploaded_blobs"]["FE-50276.pdf"],
             "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf",
         )
-        # Verify AddCoreDataEmailLog payload received the Azure Blob URL for the PDF
+        # Verify AddCoreDataEmailLog payload received only the Azure Blob URL for the PDF (no XML)
         first_post_payload = mock_http_post.call_args_list[0].kwargs["json"]
         filenames_sent = [att["fileName"] for att in first_post_payload["attachments"]]
-        self.assertIn("FE-50276.xml", filenames_sent)
-        self.assertIn(
-            "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf",
+        self.assertEqual(
             filenames_sent,
+            ["https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50276.pdf"],
         )
         ml_payload = mock_http_post.call_args_list[2].kwargs["json"]
         self.assertEqual(
@@ -364,6 +363,98 @@ class TestMessageProcessorIntegration(unittest.TestCase):
                 "referenceNo": "",
             },
         )
+
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
+    @patch("app.backend.client.httpx.post")
+    @patch("app.backend.client.httpx.get")
+    @patch("app.pipeline.message_processor.get_message_details")
+    @patch("app.pipeline.message_processor.get_attachments")
+    @patch("app.pipeline.message_processor.save_attachment")
+    def test_only_pdf_uploaded_to_blob_and_sent_to_email_log(
+        self, mock_save_att, mock_get_att, mock_get_msg, mock_http_get, mock_http_post, mock_upload_pdf
+    ):
+        pdf_url = "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50277.pdf"
+        mock_upload_pdf.return_value = pdf_url
+        message_id = "test_msg_pdf_only_payload"
+
+        mock_post_email = MagicMock()
+        mock_post_email.status_code = 200
+        mock_post_email.json.return_value = {"emailLogId": 12}
+
+        mock_get_att_list = MagicMock()
+        mock_get_att_list.status_code = 200
+        mock_get_att_list.json.return_value = {
+            "attachments": [
+                {"attachmentId": 1201, "fileName": pdf_url},
+            ]
+        }
+
+        mock_post_activity = MagicMock()
+        mock_post_activity.status_code = 200
+        mock_post_activity.json.return_value = {"activityId": 9001}
+
+        mock_post_ml = MagicMock()
+        mock_post_ml.status_code = 200
+        mock_post_ml.json.return_value = {"success": True}
+
+        mock_http_post.side_effect = [mock_post_email, mock_post_activity, mock_post_ml]
+        mock_http_get.return_value = mock_get_att_list
+
+        mock_get_msg.return_value = {
+            "id": message_id,
+            "subject": "FW: Invoice Shipment N°: PGAA00307692",
+            "from": {"emailAddress": {"address": "rbanua@pegasuslogistics.com"}},
+            "bodyPreview": "FYI",
+            "receivedDateTime": "2026-11-23T16:27:58Z",
+        }
+        mock_get_att.return_value = [
+            {"id": "att1", "name": "FE-50277.pdf", "contentType": "application/pdf", "size": 500},
+            {"id": "att2", "name": "FE-50277.xml", "contentType": "text/xml", "size": 200},
+            {"id": "att3", "name": "AHC-50277.xml", "contentType": "text/xml", "size": 150},
+            {"id": "att4", "name": "image001.png", "contentType": "image/png", "size": 50},
+            {"id": "att5", "name": "image002.png", "contentType": "image/png", "size": 50},
+        ]
+
+        sample_factura = """<?xml version="1.0" encoding="utf-8"?>
+<FacturaElectronica xmlns="https://cdn.comprobanteselectronicos.go.cr/xml-schemas/v4.4/facturaElectronica">
+    <Clave>50618052600310265506100100001010000050277194729135</Clave>
+    <NumeroConsecutivo>00100001010000050277</NumeroConsecutivo>
+    <Otros>
+        <OtroTexto codigo="Shipment Reference">REF:SCSR00307692,INV:CR10135</OtroTexto>
+    </Otros>
+</FacturaElectronica>"""
+        sample_ahc = """<?xml version="1.0" encoding="utf-8"?>
+<MensajeHacienda xmlns="https://cdn.comprobanteselectronicos.go.cr/xml-schemas/v4.4/mensajeHacienda">
+    <Clave>50618052600310265506100100001010000050277194729135</Clave>
+</MensajeHacienda>"""
+
+        def mock_save_side_effect(att, dest_dir):
+            file_path = dest_dir / att["name"]
+            if att["name"] == "FE-50277.xml":
+                file_path.write_text(sample_factura, encoding="utf-8")
+            elif att["name"] == "AHC-50277.xml":
+                file_path.write_text(sample_ahc, encoding="utf-8")
+            elif att["name"].endswith(".pdf"):
+                file_path.write_bytes(b"%PDF-1.4 dummy")
+            else:
+                file_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+            return file_path
+
+        mock_save_att.side_effect = mock_save_side_effect
+
+        result_data = process_new_message(message_id)
+
+        mock_upload_pdf.assert_called_once()
+        self.assertEqual(mock_upload_pdf.call_args.args[0].name, "FE-50277.pdf")
+        self.assertEqual(result_data["uploaded_blobs"], {"FE-50277.pdf": pdf_url})
+
+        first_post_payload = mock_http_post.call_args_list[0].kwargs["json"]
+        self.assertEqual(
+            first_post_payload["attachments"],
+            [{"attachmentId": 0, "fileName": pdf_url}],
+        )
+        self.assertEqual(result_data["invoice_number"], "00100001010000050277")
+        self.assertEqual(result_data["shipment_number"], "SCSR00307692")
 
 
 if __name__ == "__main__":

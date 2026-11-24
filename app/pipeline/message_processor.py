@@ -97,9 +97,8 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     )
 
     # Prepare attachment filenames for Core Data:
-    # Rule: For PDF attachments, upload to Azure Blob (container plgaiml1/cwdocs)
-    # and pass the path 'plgaiml1/cwdocs/<filename>' (no date) to AddCoreDataEmailLog.
-    # For XML/other attachments, pass the original filename.
+    # Rule: Only PDF attachments are uploaded to Azure Blob (container plgaiml1/cwdocs)
+    # and sent to AddCoreDataEmailLog. XML, images, and other non-PDF attachments are excluded.
     attachment_filenames: list[str] = []
     uploaded_blobs: dict[str, str] = {}
     for attachment, saved_path in saved_attachments:
@@ -114,7 +113,10 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
                 blob_path,
             )
         else:
-            attachment_filenames.append(att_name)
+            logger.debug(
+                "Skipping non-PDF attachment %s from Azure Blob and AddCoreDataEmailLog",
+                att_name,
+            )
 
     # --- Core Data API 1: Add Email Log ---
     email_log_id = core_data_client.add_email_log(

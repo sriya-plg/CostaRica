@@ -114,14 +114,17 @@ class TestMessageProcessorIntegration(unittest.TestCase):
             },
         )
 
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
     @patch("app.backend.client.httpx.post")
     @patch("app.backend.client.httpx.get")
     @patch("app.pipeline.message_processor.get_message_details")
     @patch("app.pipeline.message_processor.get_attachments")
     @patch("app.pipeline.message_processor.save_attachment")
     def test_direct_subject_when_starting_with_s(
-        self, mock_save_att, mock_get_att, mock_get_msg, mock_http_get, mock_http_post
+        self, mock_save_att, mock_get_att, mock_get_msg, mock_http_get, mock_http_post, mock_upload_pdf
     ):
+        pdf_url = "https://plgaiml1.blob.core.windows.net/plgaiml1/cwdocs/FE-50277.pdf"
+        mock_upload_pdf.return_value = pdf_url
         message_id = "test_msg_s_subject"
 
         # Mock Core Data API calls
@@ -133,7 +136,7 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         mock_get_att_list.status_code = 200
         mock_get_att_list.json.return_value = {
             "attachments": [
-                {"attachmentId": 901, "fileName": "FE-50277.xml"},
+                {"attachmentId": 901, "fileName": pdf_url},
             ]
         }
 
@@ -155,6 +158,7 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         }
         mock_get_att.return_value = [
             {"id": "att1", "name": "FE-50277.xml", "contentType": "text/xml", "size": 100},
+            {"id": "att2", "name": "FE-50277.pdf", "contentType": "application/pdf", "size": 500},
         ]
 
         sample_factura = """<?xml version="1.0" encoding="utf-8"?>
@@ -165,7 +169,10 @@ class TestMessageProcessorIntegration(unittest.TestCase):
 
         def mock_save_side_effect(att, dest_dir):
             file_path = dest_dir / att["name"]
-            file_path.write_text(sample_factura, encoding="utf-8")
+            if att["name"].endswith(".xml"):
+                file_path.write_text(sample_factura, encoding="utf-8")
+            else:
+                file_path.write_bytes(b"%PDF-1.4 dummy")
             return file_path
 
         mock_save_att.side_effect = mock_save_side_effect
@@ -455,6 +462,136 @@ class TestMessageProcessorIntegration(unittest.TestCase):
         )
         self.assertEqual(result_data["invoice_number"], "00100001010000050277")
         self.assertEqual(result_data["shipment_number"], "SCSR00307692")
+
+    @patch("app.jobs.email_poller.send_alert_email")
+    @patch("app.jobs.email_poller.mark_message_as_read")
+    @patch("app.pipeline.message_processor.process_xml_attachments")
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
+    @patch("app.backend.client.httpx.post")
+    @patch("app.backend.client.httpx.get")
+    @patch("app.pipeline.message_processor.save_attachment")
+    @patch("app.pipeline.message_processor.get_attachments")
+    @patch("app.pipeline.message_processor.get_message_details")
+    def test_stops_and_leaves_unread_when_no_attachments(
+        self,
+        mock_get_msg,
+        mock_get_att,
+        mock_save_att,
+        mock_http_get,
+        mock_http_post,
+        mock_upload_pdf,
+        mock_process_xml,
+        mock_mark_read,
+        mock_send_alert,
+    ):
+        from app.jobs.email_poller import process_one_email, tracker
+
+        tracker._in_flight.clear()
+        tracker._failures.clear()
+        mock_get_msg.return_value = {"id": "msg_empty", "subject": "No attachments"}
+        mock_get_att.return_value = []
+
+        ok = process_one_email({"id": "msg_empty", "subject": "No attachments"})
+
+        self.assertFalse(ok)
+        mock_save_att.assert_not_called()
+        mock_upload_pdf.assert_not_called()
+        mock_process_xml.assert_not_called()
+        mock_http_post.assert_not_called()
+        mock_http_get.assert_not_called()
+        mock_mark_read.assert_not_called()
+        mock_send_alert.assert_called_once()
+
+    @patch("app.jobs.email_poller.send_alert_email")
+    @patch("app.jobs.email_poller.mark_message_as_read")
+    @patch("app.pipeline.message_processor.process_xml_attachments")
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
+    @patch("app.backend.client.httpx.post")
+    @patch("app.backend.client.httpx.get")
+    @patch("app.pipeline.message_processor.save_attachment")
+    @patch("app.pipeline.message_processor.get_attachments")
+    @patch("app.pipeline.message_processor.get_message_details")
+    def test_stops_and_leaves_unread_when_no_pdf_attachment(
+        self,
+        mock_get_msg,
+        mock_get_att,
+        mock_save_att,
+        mock_http_get,
+        mock_http_post,
+        mock_upload_pdf,
+        mock_process_xml,
+        mock_mark_read,
+        mock_send_alert,
+    ):
+        from app.jobs.email_poller import process_one_email, tracker
+
+        tracker._in_flight.clear()
+        tracker._failures.clear()
+        mock_get_msg.return_value = {"id": "msg_xml_only", "subject": "Shipment N°: SCSR123456"}
+        mock_get_att.return_value = [
+            {"id": "att1", "name": "FE-123.xml", "contentType": "text/xml", "size": 100},
+            {"id": "att2", "name": "image001.png", "contentType": "image/png", "size": 50},
+        ]
+
+        ok = process_one_email({"id": "msg_xml_only", "subject": "Shipment N°: SCSR123456"})
+
+        self.assertFalse(ok)
+        mock_save_att.assert_not_called()
+        mock_upload_pdf.assert_not_called()
+        mock_process_xml.assert_not_called()
+        mock_http_post.assert_not_called()
+        mock_http_get.assert_not_called()
+        mock_mark_read.assert_not_called()
+        mock_send_alert.assert_called_once()
+
+    @patch("app.jobs.email_poller.send_alert_email")
+    @patch("app.jobs.email_poller.mark_message_as_read")
+    @patch("app.pipeline.message_processor.process_xml_attachments")
+    @patch("app.pipeline.message_processor.upload_pdf_to_azure")
+    @patch("app.backend.client.httpx.post")
+    @patch("app.backend.client.httpx.get")
+    @patch("app.pipeline.message_processor.save_attachment")
+    @patch("app.pipeline.message_processor.get_attachments")
+    @patch("app.pipeline.message_processor.get_message_details")
+    def test_stops_and_leaves_unread_when_pdf_upload_fails(
+        self,
+        mock_get_msg,
+        mock_get_att,
+        mock_save_att,
+        mock_http_get,
+        mock_http_post,
+        mock_upload_pdf,
+        mock_process_xml,
+        mock_mark_read,
+        mock_send_alert,
+    ):
+        from app.jobs.email_poller import process_one_email, tracker
+
+        tracker._in_flight.clear()
+        tracker._failures.clear()
+        mock_get_msg.return_value = {"id": "msg_blob_fail", "subject": "Shipment N°: SCSR123456"}
+        mock_get_att.return_value = [
+            {"id": "att1", "name": "FE-123.pdf", "contentType": "application/pdf", "size": 500},
+            {"id": "att2", "name": "FE-123.xml", "contentType": "text/xml", "size": 100},
+        ]
+
+        def mock_save_side_effect(att, dest_dir):
+            file_path = dest_dir / att["name"]
+            file_path.write_bytes(b"dummy")
+            return file_path
+
+        mock_save_att.side_effect = mock_save_side_effect
+        mock_upload_pdf.side_effect = RuntimeError("Azure upload error")
+
+        ok = process_one_email({"id": "msg_blob_fail", "subject": "Shipment N°: SCSR123456"})
+
+        self.assertFalse(ok)
+        mock_upload_pdf.assert_called_once()
+        mock_process_xml.assert_not_called()
+        mock_http_post.assert_not_called()
+        mock_http_get.assert_not_called()
+        mock_mark_read.assert_not_called()
+        mock_send_alert.assert_called_once()
 
 
 if __name__ == "__main__":

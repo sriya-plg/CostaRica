@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     MAILBOX: str = Field(validation_alias=AliasChoices("MAILBOX", "BOT_EMAIL"))
     POLL_INTERVAL_SECONDS: int = 15
     INITIAL_LOOKBACK_HOURS: int = 48
+    MAX_EMAIL_RETRIES: int = 2
+    ALERT_EMAIL: str = ""
     LOG_DIR: str = "logs"
     ATTACHMENTS_DIR: str = "downloads"
     TIMEZONE: str = "America/Chicago"

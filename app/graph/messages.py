@@ -55,3 +55,53 @@ def get_message_details(message_id: str) -> dict[str, Any]:
     logger.debug("Fetching message details for message_id=%s", message_id)
     return graph_client.request("GET", path)
 
+
+def send_alert_email(
+    *,
+    message_id: str,
+    subject: str | None,
+    reason: str,
+    sender: str = "",
+    received_at: str | None = None,
+) -> bool:
+    """Send a failure alert email via Microsoft Graph to configured ALERT_EMAIL recipient(s)."""
+    recipients = [addr.strip() for addr in settings.ALERT_EMAIL.split(",") if addr.strip()]
+    if not recipients:
+        logger.warning(
+            "ALERT_EMAIL is not configured; skipping alert email for message_id=%s",
+            message_id,
+        )
+        return False
+
+    alert_subject = f"[Costa Rica Poller Alert] Failed to process email: {subject or message_id}"
+    body_lines = [
+        "Email processing failed on initial attempt.",
+        "",
+        f"Message ID    : {message_id}",
+        f"Subject       : {subject or '(none)'}",
+        f"Sender        : {sender or '(unknown)'}",
+        f"Received At   : {received_at or '(unknown)'}",
+        f"Failure Reason: {reason}",
+        "",
+        f"This email will be retried up to {settings.MAX_EMAIL_RETRIES} more time(s) before being marked as read.",
+    ]
+
+    payload = {
+        "message": {
+            "subject": alert_subject,
+            "body": {
+                "contentType": "Text",
+                "content": "\n".join(body_lines),
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in recipients
+            ],
+        },
+        "saveToSentItems": True,
+    }
+
+    path = f"/users/{settings.MAILBOX}/sendMail"
+    logger.info("Sending failure alert email for message_id=%s to %s", message_id, recipients)
+    graph_client.request("POST", path, json=payload)
+    return True
+

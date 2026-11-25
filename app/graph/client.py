@@ -93,7 +93,7 @@ class GraphClient:
                         response.text,
                     )
                 response.raise_for_status()
-                if response.status_code == 204:
+                if response.status_code in (202, 204) or not response.content:
                     return {}
                 return response.json()
             except httpx.HTTPStatusError as exc:

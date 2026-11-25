@@ -76,8 +76,22 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
     # Fetch attachments from Graph
     attachments = get_attachments(message_id)
     if not attachments:
-        logger.info("message_id=%s has no file attachments", message_id)
-        return {}
+        logger.warning(
+            "message_id=%s has no file attachments; stopping processing and leaving unread",
+            message_id,
+        )
+        raise ValueError(f"Message {message_id} has no file attachments")
+
+    has_pdf = any(
+        (att.get("name") or "").strip(" .").lower().endswith(".pdf")
+        for att in attachments
+    )
+    if not has_pdf:
+        logger.warning(
+            "message_id=%s has no PDF attachment; stopping processing and leaving unread",
+            message_id,
+        )
+        raise ValueError(f"Message {message_id} has no PDF attachment")
 
     # Download attachments into timestamped directory
     dest_dir = make_email_download_dir(timestamp)
@@ -105,6 +119,8 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
         att_name = attachment.get("name") or saved_path.name
         if saved_path.suffix.lower() == ".pdf":
             blob_path = upload_pdf_to_azure(saved_path, dest_dir.name)
+            if not blob_path:
+                raise RuntimeError(f"Azure Blob upload returned empty path for {att_name}")
             uploaded_blobs[att_name] = blob_path
             attachment_filenames.append(blob_path)
             logger.info(
@@ -117,6 +133,13 @@ def process_new_message(message_id: str, received_at: str | None = None) -> dict
                 "Skipping non-PDF attachment %s from Azure Blob and AddCoreDataEmailLog",
                 att_name,
             )
+
+    if not uploaded_blobs:
+        logger.warning(
+            "message_id=%s had no PDF uploaded to Azure Blob; stopping processing and leaving unread",
+            message_id,
+        )
+        raise ValueError(f"Message {message_id} has no uploaded PDF attachment")
 
     # --- Core Data API 1: Add Email Log ---
     email_log_id = core_data_client.add_email_log(

@@ -3,18 +3,19 @@ import threading
 from typing import Any
 
 from app.core.config import settings
-from app.graph.messages import list_unread_emails, mark_message_as_read
+from app.graph.messages import list_unread_emails, mark_message_as_read, send_alert_email
 from app.pipeline.message_processor import process_new_message
 
 logger = logging.getLogger(__name__)
 
 
 class EmailTracker:
-    """Thread-safe in-flight tracker to prevent concurrent processing of the same email."""
+    """Thread-safe in-flight and retry tracker for email processing."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._in_flight: set[str] = set()
+        self._failures: dict[str, int] = {}
 
     def is_in_flight(self, message_id: str) -> bool:
         with self._lock:
@@ -31,12 +32,29 @@ class EmailTracker:
         with self._lock:
             self._in_flight.discard(message_id)
 
+    def record_failure(self, message_id: str) -> int:
+        with self._lock:
+            count = self._failures.get(message_id, 0) + 1
+            self._failures[message_id] = count
+            return count
+
+    def clear_failures(self, message_id: str) -> None:
+        with self._lock:
+            self._failures.pop(message_id, None)
+
 
 tracker = EmailTracker()
 
 
+def _extract_sender_address(message: dict[str, Any]) -> str:
+    sender_info = message.get("from")
+    if isinstance(sender_info, dict):
+        return sender_info.get("emailAddress", {}).get("address", "") or ""
+    return ""
+
+
 def process_one_email(message: dict[str, Any]) -> bool:
-    """Process a single unread email and mark as read upon successful completion."""
+    """Process a single unread email and manage read/retry/alert disposition."""
     message_id = message.get("id")
     if not message_id:
         return False
@@ -53,6 +71,7 @@ def process_one_email(message: dict[str, Any]) -> bool:
             message.get("subject"),
         )
         process_new_message(message_id, received_at=message.get("receivedDateTime"))
+        tracker.clear_failures(message_id)
 
         # Disposition: Success -> Mark isRead=true in Outlook
         try:
@@ -63,11 +82,48 @@ def process_one_email(message: dict[str, Any]) -> bool:
         return True
 
     except Exception as exc:
-        logger.exception(
-            "Failed to process email message_id=%s. Leaving unread in Outlook for retry. Error: %s",
-            message_id,
-            exc,
-        )
+        failure_count = tracker.record_failure(message_id)
+        max_attempts = 1 + settings.MAX_EMAIL_RETRIES
+
+        if failure_count == 1:
+            try:
+                send_alert_email(
+                    message_id=message_id,
+                    subject=message.get("subject"),
+                    reason=str(exc),
+                    sender=_extract_sender_address(message),
+                    received_at=message.get("receivedDateTime"),
+                )
+            except Exception as alert_exc:
+                logger.error(
+                    "Failed to send alert email for message_id=%s: %s",
+                    message_id,
+                    alert_exc,
+                )
+
+        if failure_count >= max_attempts:
+            logger.error(
+                "Email message_id=%s failed %d/%d attempt(s). Marking as read to stop retries. Error: %s",
+                message_id,
+                failure_count,
+                max_attempts,
+                exc,
+            )
+            try:
+                mark_message_as_read(message_id)
+                tracker.clear_failures(message_id)
+            except Exception as mark_exc:
+                logger.warning("Could not mark message %s as read in Graph: %s", message_id, mark_exc)
+        else:
+            retries_remaining = max_attempts - failure_count
+            logger.exception(
+                "Failed to process email message_id=%s (attempt %d/%d, %d retry(s) remaining). Leaving unread in Outlook. Error: %s",
+                message_id,
+                failure_count,
+                max_attempts,
+                retries_remaining,
+                exc,
+            )
         return False
 
     finally:

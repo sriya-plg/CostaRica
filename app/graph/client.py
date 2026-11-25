@@ -17,15 +17,21 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 class GraphClient:
     def __init__(self) -> None:
-        self._app = msal.ConfidentialClientApplication(
-            settings.CLIENT_ID,
-            authority=f"https://login.microsoftonline.com/{settings.TENANT_ID}",
-            client_credential=settings.CLIENT_SECRET,
-        )
+        self._app: msal.ConfidentialClientApplication | None = None
         self._token: str | None = None
 
+    @property
+    def app(self) -> msal.ConfidentialClientApplication:
+        if self._app is None:
+            self._app = msal.ConfidentialClientApplication(
+                settings.CLIENT_ID,
+                authority=f"https://login.microsoftonline.com/{settings.TENANT_ID}",
+                client_credential=settings.CLIENT_SECRET,
+            )
+        return self._app
+
     def _acquire_token(self) -> str:
-        result = self._app.acquire_token_for_client(scopes=SCOPES)
+        result = self.app.acquire_token_for_client(scopes=SCOPES)
         if "access_token" not in result:
             error = result.get("error_description") or result.get("error") or "unknown"
             raise RuntimeError(f"Failed to acquire Graph token: {error}")
@@ -87,7 +93,7 @@ class GraphClient:
                         response.text,
                     )
                 response.raise_for_status()
-                if response.status_code == 204:
+                if response.status_code in (202, 204) or not response.content:
                     return {}
                 return response.json()
             except httpx.HTTPStatusError as exc:
